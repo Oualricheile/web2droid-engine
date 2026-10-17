@@ -1,0 +1,49 @@
+workflows:
+  web2droid:
+    name: Web2Droid
+    instance_type: linux_x2
+    max_build_duration: 30
+    environment:
+      java: 17
+    scripts:
+      - name: Préparation du projet
+        script: |
+          set -euo pipefail
+          curl -fsS --retry 2 --max-time 120 -X POST "$GENERATOR_URL" -H "Content-Type: application/json" \
+            -d "{\"build_id\":\"$BUILD_ID\",\"token\":\"$BUILD_TOKEN\"}" -o generate.sh
+          rm -rf project && mkdir project && cd project && bash ../generate.sh
+      - name: Configuration Android
+        script: |
+          set -euo pipefail
+          curl -fsSL --retry 2 -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle.zip -d tools
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > project/local.properties
+      - name: Intégration du splash screen
+        script: |
+          test -s project/app/src/main/res/drawable-nodpi/splash_logo.png
+          grep -q windowSplashScreenBackground project/app/src/main/res/values/themes.xml
+      - name: Compilation APK
+        script: |
+          cd project
+          if [ "$BUILD_TYPE" = "release" ]; then T=assembleRelease; else T=assembleDebug; fi
+          ../tools/gradle-8.7/bin/gradle --no-daemon $T
+      - name: Compilation AAB
+        script: |
+          cd project
+          if [ "$BUILD_TYPE" = "release" ]; then T=bundleRelease; else T=bundleDebug; fi
+          ../tools/gradle-8.7/bin/gradle --no-daemon $T
+      - name: Vérification des fichiers
+        script: |
+          set -euo pipefail
+          APK=$(find project/app/build/outputs/apk -name "*.apk" | head -1)
+          AAB=$(find project/app/build/outputs/bundle -name "*.aab" | head -1)
+          unzip -l "$APK" | grep -q AndroidManifest.xml
+          unzip -l "$AAB" | grep -q base/manifest/AndroidManifest.xml
+          BT=$(ls "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -1)
+          "$ANDROID_SDK_ROOT/build-tools/$BT/apksigner" verify --print-certs "$APK"
+          jarsigner -verify "$AAB" | grep -q "jar verified"
+          mkdir -p out && cp "$APK" out/app.apk && cp "$AAB" out/app.aab
+          rm -rf project generate.sh
+    artifacts:
+      - out/app.apk
+      - out/app.aab
